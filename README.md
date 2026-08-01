@@ -86,6 +86,15 @@ media\boot-intro.mp4
 }
 ```
 
+如果使用 Wallpaper Engine，并希望开机时不等待或拉起 Steam，建议先启用独立启动模式，同时关闭 Steam 和 Wallpaper Engine 自带的重复启动项：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\WallpaperBoot.ps1" -Action DisableSteamIntegration
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\WallpaperBoot.ps1" -Action DisableAutostarts
+```
+
+第一条命令会创建 `nosteam.txt`，让 Wallpaper Engine 直接使用已下载的本地壁纸；需要下载或更新创意工坊内容时，按第 8 节临时恢复 Steam 集成。
+
 先手动测试动画遮罩：
 
 ```powershell
