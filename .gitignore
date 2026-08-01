@@ -1,0 +1,19 @@
+# Local runtime state
+AGENTS.md
+boot-intro.config.json
+boot-shell.log
+boot-intro.state.json
+boot-integrity.manifest.json
+security-baseline.json
+shell.backup.json
+competing-autostarts.backup.json
+
+# Local build output
+BootShell.exe
+
+# Personal media assets
+media/*.mp4
+media/*.mov
+media/*.mkv
+media/*.webm
+!media/README.md

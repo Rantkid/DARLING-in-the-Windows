@@ -1,0 +1,25 @@
+{
+  "introVideo": "media\\boot-intro.mp4",
+  "wallpaperEngineExe": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper64.exe",
+  "playOncePerBoot": true,
+  "waitForWallpaperEngineSeconds": 8,
+  "launchWallpaperEngineIfMissing": true,
+  "extraRevealDelayMilliseconds": 700,
+  "startDelayMilliseconds": 0,
+  "hideDesktopIcons": true,
+  "hideTaskbar": true,
+  "sendWallpaperEngineHideIcons": true,
+  "skipKeys": [
+    "Escape",
+    "Space"
+  ],
+  "skipOnMouseClick": false,
+  "volume": 0.10,
+  "stretch": "UniformToFill",
+  "fadeInMilliseconds": 250,
+  "fadeOutMilliseconds": 550,
+  "skipFadeOutMilliseconds": 220,
+  "preEndFadeOut": true,
+  "maxDurationSeconds": 45,
+  "topmostWatchdog": true
+}
