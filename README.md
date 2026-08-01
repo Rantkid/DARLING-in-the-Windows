@@ -245,5 +245,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\WallpaperBoot.ps1" -A
 
 ## 11. License
 
-项目代码采用 [MIT License](LICENSE) 开源。媒体与壁纸素材不包含在该许可证范围内。
+项目源码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，以源码公开方式发布。
+
+个人学习、研究、实验及其他非商业用途可以依照许可证免费使用、修改和分发。商业展示、收费服务、商业产品集成或其他商业用途不在免费授权范围内，使用前需要取得作者的单独商业授权。
+
+本节中文内容仅为摘要；如果与 `LICENSE` 原文存在差异，以 `LICENSE` 原文为准。媒体与壁纸素材不包含在该许可证范围内。
+
+Required Notice: Copyright (c) 2026 Rantkid.
 
