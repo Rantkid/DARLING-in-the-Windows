@@ -90,10 +90,12 @@ function Get-SystemBootStamp {
 function Test-PlayedThisBoot {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$BootStamp
+        [string]$BootStamp,
+        [Parameter(Mandatory = $true)]
+        [string]$LogonSessionKey
     )
 
-    if ([string]::IsNullOrWhiteSpace($BootStamp)) {
+    if ([string]::IsNullOrWhiteSpace($BootStamp) -or [string]::IsNullOrWhiteSpace($LogonSessionKey)) {
         return $false
     }
 
@@ -103,7 +105,11 @@ function Test-PlayedThisBoot {
 
     try {
         $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        return ([string]$state.bootStamp -eq $BootStamp -and [bool]$state.played)
+        return (
+            [string]$state.bootStamp -eq $BootStamp -and
+            [string]$state.logonSessionKey -eq $LogonSessionKey -and
+            [bool]$state.played
+        )
     } catch {
         return $false
     }
@@ -112,33 +118,23 @@ function Test-PlayedThisBoot {
 function Set-PlayedThisBoot {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$BootStamp
+        [string]$BootStamp,
+        [Parameter(Mandatory = $true)]
+        [string]$LogonSessionKey
     )
 
-    if ([string]::IsNullOrWhiteSpace($BootStamp)) {
+    if ([string]::IsNullOrWhiteSpace($BootStamp) -or [string]::IsNullOrWhiteSpace($LogonSessionKey)) {
         return
     }
 
     $state = [PSCustomObject]@{
         bootStamp = $BootStamp
+        logonSessionKey = $LogonSessionKey
         played = $true
         playedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
 
     $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
-}
-
-if ((Get-EarlyConfigBool -Name 'playOncePerBoot' -Default $true) -and -not $Force) {
-    $currentBootStamp = Get-SystemBootStamp
-    if (Test-PlayedThisBoot -BootStamp $currentBootStamp) {
-        if ($ShellMode) {
-            Start-ExplorerShellIfNeeded
-        }
-
-        return
-    }
-
-    Set-PlayedThisBoot -BootStamp $currentBootStamp
 }
 
 if (-not (Test-Path -LiteralPath $introVideo)) {
@@ -154,6 +150,43 @@ using System.Runtime.InteropServices;
 
 namespace BootIntro {
     public static class NativeMethods {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Luid {
+            public uint LowPart;
+            public int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct TokenStatistics {
+            public Luid TokenId;
+            public Luid AuthenticationId;
+            public long ExpirationTime;
+            public uint TokenType;
+            public uint ImpersonationLevel;
+            public uint DynamicCharged;
+            public uint DynamicAvailable;
+            public uint GroupCount;
+            public uint PrivilegeCount;
+            public Luid ModifiedId;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool GetTokenInformation(
+            IntPtr tokenHandle,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            int tokenInformationLength,
+            out int returnLength);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
@@ -165,6 +198,68 @@ namespace BootIntro {
     }
 }
 '@
+}
+
+function Get-CurrentLogonSessionKey {
+    # AuthenticationId belongs to the current Windows user logon session. It is
+    # renewed after a Fast Startup login even when LastBootUpTime is preserved.
+    $tokenHandle = [IntPtr]::Zero
+    $statisticsBuffer = [IntPtr]::Zero
+
+    try {
+        $tokenQuery = 0x0008
+        $tokenStatistics = 10
+        if (-not [BootIntro.NativeMethods]::OpenProcessToken(
+                [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                $tokenQuery,
+                [ref]$tokenHandle)) {
+            return ''
+        }
+
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type][BootIntro.NativeMethods+TokenStatistics])
+        $statisticsBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+        $returnLength = 0
+        if (-not [BootIntro.NativeMethods]::GetTokenInformation(
+                $tokenHandle,
+                $tokenStatistics,
+                $statisticsBuffer,
+                $size,
+                [ref]$returnLength)) {
+            return ''
+        }
+
+        $statistics = [System.Runtime.InteropServices.Marshal]::PtrToStructure(
+            $statisticsBuffer,
+            [type][BootIntro.NativeMethods+TokenStatistics])
+        return ('{0:X8}:{1:X8}' -f [uint32]$statistics.AuthenticationId.HighPart, $statistics.AuthenticationId.LowPart)
+    } catch {
+        return ''
+    } finally {
+        if ($statisticsBuffer -ne [IntPtr]::Zero) {
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($statisticsBuffer)
+        }
+
+        if ($tokenHandle -ne [IntPtr]::Zero) {
+            [BootIntro.NativeMethods]::CloseHandle($tokenHandle) | Out-Null
+        }
+    }
+}
+
+$script:pendingPlayedBootStamp = ''
+$script:pendingPlayedLogonSessionKey = ''
+if ((Get-EarlyConfigBool -Name 'playOncePerBoot' -Default $true) -and -not $Force) {
+    $currentBootStamp = Get-SystemBootStamp
+    $currentLogonSessionKey = Get-CurrentLogonSessionKey
+    if (Test-PlayedThisBoot -BootStamp $currentBootStamp -LogonSessionKey $currentLogonSessionKey) {
+        if ($ShellMode) {
+            Start-ExplorerShellIfNeeded
+        }
+
+        return
+    }
+
+    $script:pendingPlayedBootStamp = $currentBootStamp
+    $script:pendingPlayedLogonSessionKey = $currentLogonSessionKey
 }
 
 function Get-ConfigBool {
@@ -193,42 +288,6 @@ function Get-ConfigInt {
     }
 
     return [int]$config.$Name
-}
-
-function Test-LogonUiRunningInCurrentSession {
-    # LogonUI hosts the password/lock screen on the secure desktop.  The custom
-    # shell can start before that desktop is released, so playing media here is
-    # audible but not yet visible to the user.
-    try {
-        $currentSessionId = (Get-Process -Id $PID).SessionId
-        return @(
-            Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue |
-                Where-Object { $_.SessionId -eq $currentSessionId }
-        ).Count -gt 0
-    } catch {
-        # If Windows does not expose the process, do not block the shell.
-        return $false
-    }
-}
-
-function Wait-ForLogonUiRelease {
-    if (-not $ShellMode) {
-        return
-    }
-
-    $timeoutSeconds = Get-ConfigInt -Name 'waitForLogonUiExitSeconds' -Default 30
-    if ($timeoutSeconds -le 0) {
-        return
-    }
-
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
-    while (Test-LogonUiRunningInCurrentSession) {
-        if ((Get-Date) -ge $deadline) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 150
-    }
 }
 
 function Invoke-WallpaperEngineControl {
@@ -420,13 +479,14 @@ function Set-ShellVisible {
 $window = $null
 $media = $null
 $topmostTimer = $null
-$timeoutTimer = $null
+$script:timeoutTimer = $null
+$script:foregroundTimer = $null
 $script:endingTimer = $null
 $script:isClosing = $false
 $script:shellRestored = $false
+$script:mediaStarted = $false
 
 try {
-    Wait-ForLogonUiRelease
     Set-ShellVisible -Visible $false
 
     $window = New-Object System.Windows.Window
@@ -473,8 +533,12 @@ try {
             $topmostTimer.Stop()
         }
 
-        if ($timeoutTimer -ne $null) {
-            $timeoutTimer.Stop()
+        if ($script:timeoutTimer -ne $null) {
+            $script:timeoutTimer.Stop()
+        }
+
+        if ($script:foregroundTimer -ne $null) {
+            $script:foregroundTimer.Stop()
         }
 
         if ($script:endingTimer -ne $null) {
@@ -578,6 +642,15 @@ try {
     })
 
     $media.Add_MediaOpened({
+        if (-not [string]::IsNullOrWhiteSpace($script:pendingPlayedBootStamp) -and
+            -not [string]::IsNullOrWhiteSpace($script:pendingPlayedLogonSessionKey)) {
+            Set-PlayedThisBoot `
+                -BootStamp $script:pendingPlayedBootStamp `
+                -LogonSessionKey $script:pendingPlayedLogonSessionKey
+            $script:pendingPlayedBootStamp = ''
+            $script:pendingPlayedLogonSessionKey = ''
+        }
+
         & $startMediaFadeIn
 
         if (-not (Get-ConfigBool -Name 'preEndFadeOut' -Default $true)) {
@@ -605,10 +678,19 @@ try {
         $script:endingTimer.Start()
     })
 
-    $window.Add_ContentRendered({
-        $window.Activate() | Out-Null
-        if ($ShellMode) {
-            Start-ExplorerShellIfNeeded
+    $startIntroMedia = {
+        if ($script:isClosing -or $script:mediaStarted -or $window -eq $null) {
+            return
+        }
+
+        $windowHandle = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
+        if ($windowHandle -eq [IntPtr]::Zero -or [BootIntro.NativeMethods]::GetForegroundWindow() -ne $windowHandle) {
+            return
+        }
+
+        $script:mediaStarted = $true
+        if ($script:foregroundTimer -ne $null) {
+            $script:foregroundTimer.Stop()
         }
 
         $startDelay = Get-ConfigInt -Name 'startDelayMilliseconds' -Default 0
@@ -618,6 +700,31 @@ try {
 
         $media.Play()
         Start-WallpaperEngineIfMissing
+
+        $maxDurationSeconds = if ($null -ne $config.PSObject.Properties['maxDurationSeconds']) { [int]$config.maxDurationSeconds } else { 0 }
+        if ($maxDurationSeconds -gt 0) {
+            $script:timeoutTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:timeoutTimer.Interval = [TimeSpan]::FromSeconds($maxDurationSeconds)
+            $script:timeoutTimer.Add_Tick({
+                & $closeOverlay 'timeout'
+            })
+            $script:timeoutTimer.Start()
+        }
+    }
+
+    $window.Add_ContentRendered({
+        $window.Activate() | Out-Null
+        if ($ShellMode) {
+            Start-ExplorerShellIfNeeded
+        }
+
+        $script:foregroundTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:foregroundTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+        $script:foregroundTimer.Add_Tick({
+            & $startIntroMedia
+        })
+        $script:foregroundTimer.Start()
+        & $startIntroMedia
     })
 
     if (Get-ConfigBool -Name 'topmostWatchdog' -Default $true) {
@@ -633,24 +740,18 @@ try {
         $topmostTimer.Start()
     }
 
-    $maxDurationSeconds = if ($null -ne $config.PSObject.Properties['maxDurationSeconds']) { [int]$config.maxDurationSeconds } else { 0 }
-    if ($maxDurationSeconds -gt 0) {
-        $timeoutTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $timeoutTimer.Interval = [TimeSpan]::FromSeconds($maxDurationSeconds)
-        $timeoutTimer.Add_Tick({
-            & $closeOverlay 'timeout'
-        })
-        $timeoutTimer.Start()
-    }
-
     $window.ShowDialog() | Out-Null
 } finally {
     if ($topmostTimer -ne $null) {
         $topmostTimer.Stop()
     }
 
-    if ($timeoutTimer -ne $null) {
-        $timeoutTimer.Stop()
+    if ($script:timeoutTimer -ne $null) {
+        $script:timeoutTimer.Stop()
+    }
+
+    if ($script:foregroundTimer -ne $null) {
+        $script:foregroundTimer.Stop()
     }
 
     if ($script:endingTimer -ne $null) {

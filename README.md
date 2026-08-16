@@ -135,9 +135,8 @@ boot-intro.config.json
 | --- | --- |
 | `introVideo` | 开机动画视频路径。相对路径会从项目目录解析。 |
 | `wallpaperEngineExe` | `wallpaper64.exe` 的路径。 |
-| `playOncePerBoot` | 每次开机只播放一次。 |
+| `playOncePerBoot` | 每次用户登录会话只播放一次；兼容 Windows 快速启动后的关机再开机。 |
 | `waitForWallpaperEngineSeconds` | 遮罩后面等待 Wallpaper Engine 的时间。 |
-| `waitForLogonUiExitSeconds` | Shell 模式下等待登录界面退出的最长秒数，避免音频在密码界面提前播放；`0` 表示不等待。默认 `30`。 |
 | `hideDesktopIcons` | 动画期间隐藏桌面图标。 |
 | `hideTaskbar` | 动画期间隐藏任务栏。 |
 | `skipKeys` | 跳过动画的按键，默认 `Escape`、`Space`。 |
