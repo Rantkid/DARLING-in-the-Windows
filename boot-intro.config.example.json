@@ -6,6 +6,7 @@
   "launchWallpaperEngineIfMissing": true,
   "extraRevealDelayMilliseconds": 700,
   "startDelayMilliseconds": 0,
+  "waitForLogonUiExitSeconds": 30,
   "hideDesktopIcons": true,
   "hideTaskbar": true,
   "sendWallpaperEngineHideIcons": true,

@@ -195,6 +195,42 @@ function Get-ConfigInt {
     return [int]$config.$Name
 }
 
+function Test-LogonUiRunningInCurrentSession {
+    # LogonUI hosts the password/lock screen on the secure desktop.  The custom
+    # shell can start before that desktop is released, so playing media here is
+    # audible but not yet visible to the user.
+    try {
+        $currentSessionId = (Get-Process -Id $PID).SessionId
+        return @(
+            Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue |
+                Where-Object { $_.SessionId -eq $currentSessionId }
+        ).Count -gt 0
+    } catch {
+        # If Windows does not expose the process, do not block the shell.
+        return $false
+    }
+}
+
+function Wait-ForLogonUiRelease {
+    if (-not $ShellMode) {
+        return
+    }
+
+    $timeoutSeconds = Get-ConfigInt -Name 'waitForLogonUiExitSeconds' -Default 30
+    if ($timeoutSeconds -le 0) {
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while (Test-LogonUiRunningInCurrentSession) {
+        if ((Get-Date) -ge $deadline) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 150
+    }
+}
+
 function Invoke-WallpaperEngineControl {
     param(
         [Parameter(Mandatory = $true)]
@@ -390,6 +426,7 @@ $script:isClosing = $false
 $script:shellRestored = $false
 
 try {
+    Wait-ForLogonUiRelease
     Set-ShellVisible -Visible $false
 
     $window = New-Object System.Windows.Window
