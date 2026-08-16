@@ -409,6 +409,37 @@ function Set-WindowClassVisible {
     } while ($current -ne [IntPtr]::Zero)
 }
 
+function Hide-InputMethodUiForIntro {
+    # Windows 11 hosts the floating IME toolbar in TextInputHost.exe. Record only
+    # windows that were already visible, so restoring never forces an IME UI open.
+    $script:hiddenInputMethodWindows = @()
+
+    try {
+        foreach ($process in @(Get-Process -Name 'TextInputHost' -ErrorAction SilentlyContinue)) {
+            $windowHandle = [IntPtr]$process.MainWindowHandle
+            if ($windowHandle -eq [IntPtr]::Zero) {
+                continue
+            }
+
+            [BootIntro.NativeMethods]::ShowWindow($windowHandle, 0) | Out-Null
+            $script:hiddenInputMethodWindows += $windowHandle
+        }
+    } catch {
+        # An IME update must never block the login animation.
+    }
+}
+
+function Restore-InputMethodUiAfterIntro {
+    foreach ($windowHandle in @($script:hiddenInputMethodWindows)) {
+        if ($windowHandle -ne [IntPtr]::Zero) {
+            # SW_SHOWNOACTIVATE: restore the previous UI without stealing focus.
+            [BootIntro.NativeMethods]::ShowWindow($windowHandle, 4) | Out-Null
+        }
+    }
+
+    $script:hiddenInputMethodWindows = @()
+}
+
 function Get-DesktopIconWindow {
     $progman = [BootIntro.NativeMethods]::FindWindow('Progman', $null)
     if ($progman -ne [IntPtr]::Zero) {
@@ -485,9 +516,11 @@ $script:endingTimer = $null
 $script:isClosing = $false
 $script:shellRestored = $false
 $script:mediaStarted = $false
+$script:hiddenInputMethodWindows = @()
 
 try {
     Set-ShellVisible -Visible $false
+    Hide-InputMethodUiForIntro
 
     $window = New-Object System.Windows.Window
     $window.WindowStyle = [System.Windows.WindowStyle]::None
@@ -765,6 +798,8 @@ try {
     if ($ShellMode) {
         Start-ExplorerShellIfNeeded
     }
+
+    Restore-InputMethodUiAfterIntro
 
     if (-not $script:shellRestored) {
         Set-ShellVisible -Visible $true
