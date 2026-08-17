@@ -146,10 +146,14 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 if (-not ('BootIntro.NativeMethods' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace BootIntro {
     public static class NativeMethods {
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
         [StructLayout(LayoutKind.Sequential)]
         public struct Luid {
             public uint LowPart;
@@ -195,6 +199,34 @@ namespace BootIntro {
 
         [DllImport("user32.dll")]
         public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        public static List<IntPtr> GetVisibleTopLevelWindowsForProcessName(string processName) {
+            var processIds = new HashSet<uint>();
+            foreach (var process in Process.GetProcessesByName(processName)) {
+                processIds.Add((uint)process.Id);
+                process.Dispose();
+            }
+
+            var result = new List<IntPtr>();
+            EnumWindows((hWnd, lParam) => {
+                uint processId;
+                GetWindowThreadProcessId(hWnd, out processId);
+                if (processIds.Contains(processId) && IsWindowVisible(hWnd)) {
+                    result.Add(hWnd);
+                }
+                return true;
+            }, IntPtr.Zero);
+            return result;
+        }
     }
 }
 '@
@@ -339,57 +371,6 @@ function Start-WallpaperEngineIfMissing {
     }
 }
 
-function Wait-ForProcessName {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-        [int]$TimeoutSeconds = 0
-    )
-
-    if ($TimeoutSeconds -le 0) {
-        return $false
-    }
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Get-Process -Name $Name -ErrorAction SilentlyContinue) {
-            return $true
-        }
-
-        Start-Sleep -Milliseconds 200
-    }
-
-    return $false
-}
-
-function Wait-ForWallpaperEngineBeforeReveal {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Reason
-    )
-
-    if ($Reason -eq 'skip' -or $Reason -eq 'failed') {
-        return
-    }
-
-    Start-WallpaperEngineIfMissing
-
-    $waitSeconds = Get-ConfigInt -Name 'waitForWallpaperEngineSeconds' -Default 0
-    if ($waitSeconds -gt 0) {
-        $deadline = (Get-Date).AddSeconds($waitSeconds)
-        while ((Get-Date) -lt $deadline -and -not (Test-WallpaperEngineRunning)) {
-            Start-Sleep -Milliseconds 200
-        }
-    }
-
-    if (Test-WallpaperEngineRunning) {
-        $extraRevealDelay = Get-ConfigInt -Name 'extraRevealDelayMilliseconds' -Default 0
-        if ($extraRevealDelay -gt 0) {
-            Start-Sleep -Milliseconds $extraRevealDelay
-        }
-    }
-}
-
 function Set-WindowClassVisible {
     param(
         [Parameter(Mandatory = $true)]
@@ -410,19 +391,16 @@ function Set-WindowClassVisible {
 }
 
 function Hide-InputMethodUiForIntro {
-    # Windows 11 hosts the floating IME toolbar in TextInputHost.exe. Record only
-    # windows that were already visible, so restoring never forces an IME UI open.
-    $script:hiddenInputMethodWindows = @()
-
+    # TextInputHost can create its floating IME window after the overlay starts
+    # and can expose more than one top-level window. Hide every visible window
+    # from that process, recording each handle only once for later restoration.
     try {
-        foreach ($process in @(Get-Process -Name 'TextInputHost' -ErrorAction SilentlyContinue)) {
-            $windowHandle = [IntPtr]$process.MainWindowHandle
-            if ($windowHandle -eq [IntPtr]::Zero) {
-                continue
+        foreach ($windowHandle in [BootIntro.NativeMethods]::GetVisibleTopLevelWindowsForProcessName('TextInputHost')) {
+            if (-not ($script:hiddenInputMethodWindows -contains $windowHandle)) {
+                $script:hiddenInputMethodWindows += $windowHandle
             }
 
             [BootIntro.NativeMethods]::ShowWindow($windowHandle, 0) | Out-Null
-            $script:hiddenInputMethodWindows += $windowHandle
         }
     } catch {
         # An IME update must never block the login animation.
@@ -513,6 +491,11 @@ $topmostTimer = $null
 $script:timeoutTimer = $null
 $script:foregroundTimer = $null
 $script:endingTimer = $null
+$script:wallpaperProbeTimer = $null
+$script:wallpaperSettleTimer = $null
+$script:wallpaperReady = $false
+$script:wallpaperProbeDeadline = [DateTime]::MinValue
+$script:inputMethodWatchdogTimer = $null
 $script:isClosing = $false
 $script:shellRestored = $false
 $script:mediaStarted = $false
@@ -521,6 +504,15 @@ $script:hiddenInputMethodWindows = @()
 try {
     Set-ShellVisible -Visible $false
     Hide-InputMethodUiForIntro
+
+    $script:inputMethodWatchdogTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:inputMethodWatchdogTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:inputMethodWatchdogTimer.Add_Tick({
+        if (-not $script:isClosing) {
+            Hide-InputMethodUiForIntro
+        }
+    })
+    $script:inputMethodWatchdogTimer.Start()
 
     $window = New-Object System.Windows.Window
     $window.WindowStyle = [System.Windows.WindowStyle]::None
@@ -578,7 +570,17 @@ try {
             $script:endingTimer.Stop()
         }
 
-        Wait-ForWallpaperEngineBeforeReveal -Reason $Reason
+        if ($script:wallpaperProbeTimer -ne $null) {
+            $script:wallpaperProbeTimer.Stop()
+        }
+
+        if ($script:wallpaperSettleTimer -ne $null) {
+            $script:wallpaperSettleTimer.Stop()
+        }
+
+        if ($script:inputMethodWatchdogTimer -ne $null) {
+            $script:inputMethodWatchdogTimer.Stop()
+        }
 
         if (-not $script:shellRestored) {
             Set-ShellVisible -Visible $true
@@ -624,7 +626,15 @@ try {
             }
         })
 
+        $audioAnimation = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $audioAnimation.From = $media.Volume
+        $audioAnimation.To = 0.0
+        $audioAnimation.Duration = New-Object System.Windows.Duration -ArgumentList ([TimeSpan]::FromMilliseconds($fadeOutMilliseconds))
+        $audioAnimation.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+        $audioAnimation.EasingFunction = $easing
+
         $window.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $animation)
+        $media.BeginAnimation([System.Windows.Controls.MediaElement]::VolumeProperty, $audioAnimation)
     }
 
     $skipKeys = @()
@@ -664,6 +674,47 @@ try {
         $animation.EasingFunction = $easing
 
         $media.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $animation)
+    }
+
+    $startWallpaperReadinessProbe = {
+        if ($script:wallpaperReady -or $script:wallpaperProbeTimer -ne $null -or $script:wallpaperSettleTimer -ne $null) {
+            return
+        }
+
+        $waitSeconds = Get-ConfigInt -Name 'waitForWallpaperEngineSeconds' -Default 0
+        if ($waitSeconds -le 0) {
+            return
+        }
+
+        $script:wallpaperProbeDeadline = (Get-Date).AddSeconds($waitSeconds)
+        $script:wallpaperProbeTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:wallpaperProbeTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+        $script:wallpaperProbeTimer.Add_Tick({
+            if ((Get-Date) -ge $script:wallpaperProbeDeadline) {
+                $script:wallpaperProbeTimer.Stop()
+                return
+            }
+
+            if (-not (Test-WallpaperEngineRunning)) {
+                return
+            }
+
+            $script:wallpaperProbeTimer.Stop()
+            $settleDelay = Get-ConfigInt -Name 'extraRevealDelayMilliseconds' -Default 0
+            if ($settleDelay -le 0) {
+                $script:wallpaperReady = $true
+                return
+            }
+
+            $script:wallpaperSettleTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:wallpaperSettleTimer.Interval = [TimeSpan]::FromMilliseconds($settleDelay)
+            $script:wallpaperSettleTimer.Add_Tick({
+                $script:wallpaperSettleTimer.Stop()
+                $script:wallpaperReady = $true
+            })
+            $script:wallpaperSettleTimer.Start()
+        })
+        $script:wallpaperProbeTimer.Start()
     }
 
     $media.Add_MediaEnded({
@@ -733,6 +784,7 @@ try {
 
         $media.Play()
         Start-WallpaperEngineIfMissing
+        & $startWallpaperReadinessProbe
 
         $maxDurationSeconds = if ($null -ne $config.PSObject.Properties['maxDurationSeconds']) { [int]$config.maxDurationSeconds } else { 0 }
         if ($maxDurationSeconds -gt 0) {
@@ -789,6 +841,18 @@ try {
 
     if ($script:endingTimer -ne $null) {
         $script:endingTimer.Stop()
+    }
+
+    if ($script:wallpaperProbeTimer -ne $null) {
+        $script:wallpaperProbeTimer.Stop()
+    }
+
+    if ($script:wallpaperSettleTimer -ne $null) {
+        $script:wallpaperSettleTimer.Stop()
+    }
+
+    if ($script:inputMethodWatchdogTimer -ne $null) {
+        $script:inputMethodWatchdogTimer.Stop()
     }
 
     if ($media -ne $null) {
